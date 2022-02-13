@@ -1,0 +1,217 @@
+name: CI
+
+on:
+  push:
+    branches: [ master ]
+
+jobs:
+  build:
+    name: Test (${{ matrix.host.name }})
+    runs-on: ${{ matrix.host.build-runner }}
+    container: ${{ matrix.host.build-container }}
+
+    defaults:
+      run:
+        shell: bash
+
+    strategy:
+      fail-fast: false
+      matrix:
+        host:
+        - name: linux-x86_64
+          build-runner: ubuntu-20.04
+          build-container: ''
+          test-runner: ubuntu-20.04
+          test-container: ''
+          archive: 'tar.gz'
+        - name: linux-aarch64
+          build-runner: ubuntu-20.04
+          build-container: ''
+          test-runner: ubuntu-20.04
+          test-container: ''
+          archive: 'tar.gz'
+        - name: macos-x86_64
+          build-runner: macos-11
+          build-container: ''
+          test-runner: macos-11
+          test-container: ''
+          archive: 'tar.gz'
+        - name: windows-x86_64
+          build-runner: ubuntu-20.04
+          build-container: ''
+          test-runner: windows-2019
+          test-container: ''
+          archive: 'zip'
+
+    steps:
+    - name: Set up build environment (Linux)
+      if: ${{ runner.os == 'Linux' }}
+      run: |
+        # Clean up working directories
+        sudo rm -rf ${GITHUB_WORKSPACE}/*
+
+        # Install common dependencies
+        sudo apt-get update
+        sudo apt-get install dpkg-dev ninja-build
+
+        # Install dependencies for cross-compilation
+        if [ "${{ matrix.host.name }}" == "linux-aarch64" ]; then
+          # Install aarch64-linux-gnu cross toolchain
+          sudo apt-get install -y binutils-aarch64-linux-gnu \
+                                  gcc-aarch64-linux-gnu \
+                                  g++-aarch64-linux-gnu \
+                                  pkg-config-aarch64-linux-gnu
+        elif [ "${{ matrix.host.name }}" == "windows-x86_64" ]; then
+          # Install MinGW-w64 cross toolchain
+          sudo apt-get install -y binutils-mingw-w64 gcc-mingw-w64 \
+                                  g++-mingw-w64 mingw-w64-tools
+
+          # Apply mingw-w64-tools pkg-config bug workaround (see Debian bug #930492)
+          # NOTE: This bug has been fixed in the 7.0.0-3 package release, which is not part of the
+          #       Ubuntu 20.04 LTS yet.
+          sudo patch -b /usr/share/pkg-config-crosswrapper <<EOF
+        --- /usr/share/pkg-config-crosswrapper
+        +++ /usr/share/pkg-config-crosswrapper
+        @@ -11,10 +11,10 @@
+           triplet="\${basename%-pkg-config}"
+           # Normalized multiarch path if any, e.g. i386-linux-gnu for i386
+           multiarch="\$(dpkg-architecture -t"\${triplet}" -qDEB_HOST_MULTIARCH 2>/dev/null)"
+        -  if [ "\$?" != 0 ]; then
+        -      echo "Please install dpkg-dev to use pkg-config when cross-building" >&2
+        -      exit 1
+        -  fi
+        +  # if [ "\$?" != 0 ]; then
+        +  #     echo "Please install dpkg-dev to use pkg-config when cross-building" >&2
+        +  #     exit 1
+        +  # fi
+           # Native multiarch path
+           native_multiarch="\$(cat /usr/lib/pkg-config.multiarch)"
+        EOF
+
+          # Install MinGW-w64 dependencies for QEMU
+          sudo apt-key adv --keyserver keyserver.ubuntu.com --recv E08C21D5677450AD
+          echo "deb https://qemu.weilnetz.de/debian/ testing contrib" | sudo tee /etc/apt/sources.list.d/cygwin.list
+          sudo apt-get update
+          sudo apt-get install mingw64-x86-64-glib2.0 mingw64-x86-64-pixman
+        fi
+
+        # Set environment variables
+        echo "TAR=tar" >> $GITHUB_ENV
+        echo "SRC_ROOT=${GITHUB_WORKSPACE}/src" >> $GITHUB_ENV
+        echo "OUTPUT_ROOT=${RUNNER_TEMP}/output" >> $GITHUB_ENV
+        echo "BUILD_ROOT=${RUNNER_TEMP}/build" >> $GITHUB_ENV
+
+    - name: Set up build environment (macOS)
+      if: ${{ runner.os == 'macOS' }}
+      run: |
+        # Clean up working directories
+        rm -rf ${GITHUB_WORKSPACE}/*
+
+        # Install dependencies
+        brew install ninja
+
+        # Set environment variables
+        echo "TAR=gtar" >> $GITHUB_ENV
+        echo "SRC_ROOT=${GITHUB_WORKSPACE}/src" >> $GITHUB_ENV
+        echo "OUTPUT_ROOT=${RUNNER_TEMP}/output" >> $GITHUB_ENV
+        echo "BUILD_ROOT=${RUNNER_TEMP}/build" >> $GITHUB_ENV
+
+    - name: Check out source code
+      uses: actions/checkout@v2
+      with:
+        fetch-depth: 0
+        submodules: true
+
+    - name: Build QEMU
+      run: |
+        # Get version information
+        PKGVERSION=$(git describe --tags --match 'v*')
+        PKGVERSION="${PKGVERSION:1}"
+        echo "${PKGVERSION}"
+
+        # Check source directory
+        SRC_DIR=${SRC_ROOT}/qemu
+        pushd ${SRC_DIR}
+        git describe
+        popd
+
+        # Create output directory
+        OUTPUT_DIR="${OUTPUT_ROOT}/qemu"
+        mkdir -p ${OUTPUT_DIR}
+
+        # Create build directory
+        BUILD_DIR="${BUILD_ROOT}/qemu"
+        mkdir -p ${BUILD_DIR}
+        pushd ${BUILD_DIR}
+
+        # Configure QEMU
+        QEMU_TARGETS=" \
+          aarch64-softmmu \
+          arm-softmmu \
+          i386-softmmu \
+          mips-softmmu \
+          mipsel-softmmu \
+          nios2-softmmu \
+          xtensa-softmmu \
+          riscv32-softmmu \
+          riscv64-softmmu \
+          sparc-softmmu \
+          x86_64-softmmu \
+          "
+
+        if [[ "${{ matrix.host.name }}" =~ ^linux.* ]]; then
+          # NOTE: The ARC patch for QEMU does not currently support non-Linux
+          #       hosts, so exclude it for macOS and Windows builds.
+          QEMU_TARGETS+=" \
+            arc-softmmu \
+            arc64-softmmu \
+          "
+        fi
+
+        QEMU_FLAGS=" \
+          --disable-docs --disable-sdl --disable-gtk --disable-debug-info
+          --disable-cap-ng --disable-libnfs --disable-libusb
+          --disable-libiscsi --disable-usb-redir --disable-linux-aio
+          --disable-guest-agent --disable-libssh --disable-vnc --disable-kvm
+          --disable-seccomp --disable-tpm --disable-numa --disable-glusterfs
+          --disable-virtfs --disable-xen --disable-curl --disable-attr
+          --disable-curses --disable-iconv --disable-sheepdog
+          --disable-parallels --disable-replication
+          --disable-live-block-migration --disable-dmg
+        "
+
+        if [ "${{ matrix.host.name }}" == "linux-aarch64" ]; then
+          QEMU_FLAGS="${QEMU_FLAGS} --cross-prefix=aarch64-linux-gnu-"
+        elif [ "${{ matrix.host.name }}" == "windows-x86_64" ]; then
+          QEMU_FLAGS="${QEMU_FLAGS} --cross-prefix=x86_64-w64-mingw32-"
+        fi
+
+        ${SRC_DIR}/configure \
+          ${QEMU_FLAGS} \
+          --target-list="${QEMU_TARGETS}" \
+          --prefix="${OUTPUT_DIR}" \
+          --with-pkgversion="Test ${PKGVERSION}"
+
+        # Build and install QEMU
+        ninja all
+        ninja install
+        popd
+
+        # Create archive
+        ARCHIVE_NAME=qemu_${{ matrix.host.name }}
+        ARCHIVE_FILE=${ARCHIVE_NAME}.${{ matrix.host.archive }}
+
+        if [ "${{ matrix.host.archive }}" == "tar.gz" ]; then
+          ${TAR} -zcvf ${OUTPUT_ROOT}/${ARCHIVE_FILE} --owner=0 --group=0 \
+                 -C ${OUTPUT_ROOT} qemu
+        elif [ "${{ matrix.host.archive }}" == "zip" ]; then
+          pushd ${OUTPUT_ROOT}
+          zip -r ${ARCHIVE_FILE} qemu
+          popd
+        fi
+
+    - name: Upload
+      uses: actions/upload-artifact@v2
+      with:
+        name: qemu_${{ matrix.host.name }}
+        path: ${{ env.OUTPUT_ROOT }}/qemu_${{ matrix.host.name }}.${{ matrix.host.archive }}

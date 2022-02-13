@@ -1,0 +1,27 @@
+name: Test
+
+on:
+  schedule:
+  # Run every minute
+  - cron: '* * * * *'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+  steps:
+  - name: echo-default-env-variables
+    run: |
+      whoami
+      echo "Shell: ${SHELL}"
+      echo "Home: ${HOME}"
+      echo "RUNNER_NAME: ${RUNNER_NAME}"
+      echo "RUNNER_TEMP: ${RUNNER_TEMP}"
+      echo "GITHUB_WORKFLOW: ${GITHUB_WORKFLOW}"
+      echo "GITHUB_ACTIONS: ${GITHUB_ACTIONS}"
+      echo "GITHUB_ACTOR: ${GITHUB_ACTOR}"
+      echo "GITHUB_REPOSITORY: ${GITHUB_REPOSITORY}"
+      echo "GITHUB_EVENT_NAME: ${GITHUB_EVENT_NAME}"
+      echo "GITHUB_WORKSPACE: ${GITHUB_WORKSPACE}"
+      echo "GITHUB_SHA: ${GITHUB_SHA}"
+      echo "GITHUB_REF: ${GITHUB_REF}"
